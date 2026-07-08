@@ -1,0 +1,59 @@
+# ============================================================
+# グラウンド空き監視ツール 設定ファイル
+# ============================================================
+# Discord Webhook URL はここには書かず、GitHub の Secrets に
+# DISCORD_WEBHOOK_URL という名前で登録してください（README参照）
+
+filters:
+  # 監視する曜日: sat=土, sun=日, holiday=祝日
+  days: [sat, sun, holiday]
+  # 開始時刻がこの範囲（時）のコマだけ通知する（10時〜17時開始）
+  start_hour_min: 10
+  start_hour_max: 17
+  # 何ヶ月先まで見るか（1 = 当月＋翌月末まで）
+  months_ahead: 1
+
+sites:
+  chuo:
+    enabled: true
+    name: 中央区
+    # 施設別空き状況の表で監視する行（施設名）
+    facilities: [月島運動場, 浜町運動場]
+
+  shinagawa:
+    enabled: true
+    name: 品川区
+    # 「館」ドロップダウンで選ぶ施設
+    venues: [天王洲公園, 八潮北公園]
+    # 「何をする」で選ぶ利用目的
+    purpose: 野球
+    # 「施設」ドロップダウンのうち監視対象にする施設名の正規表現
+    room_filter: 野球
+
+  ota:
+    enabled: true
+    name: 大田区
+    # カテゴリ検索で選ぶカテゴリ名
+    category: 大田スタジアム
+    # ※大田スタジアムは人工芝改修工事のため
+    #   2026/10/1〜2027/1/29 供用停止予定（区のお知らせより）
+
+  sumida:
+    enabled: true
+    name: 墨田区
+    base_url: https://yoyaku03.city.sumida.lg.jp
+    # 施設種類から探す → このボタンを押す
+    category_button: 屋外スポーツ施設
+    # 施設選択画面でチェックする施設
+    facility_checkboxes: [公園運動場]
+    # 空き状況の表のうち監視する行（正規表現）
+    row_filter: 錦糸公園野球場
+
+  suginami:
+    enabled: true
+    name: 杉並区
+    base_url: https://www.shisetsuyoyaku.city.suginami.tokyo.jp
+    category_button: スポーツ施設
+    facility_checkboxes: [上井草スポーツセンター, 下高井戸運動場]
+    # 上井草・下高井戸の中で野球系の面だけ見る場合は絞り込み
+    row_filter: 野球|運動場|グラウンド
