@@ -1,0 +1,55 @@
+name: ground-monitor
+
+on:
+  schedule:
+    # JSTの7時〜23時台に20分おき（cronはUTC表記。JST=UTC+9）
+    - cron: "*/20 22-23 * * *"   # JST 7:00-8:59
+    - cron: "*/20 0-14 * * *"    # JST 9:00-23:59
+  workflow_dispatch: {}          # 手動実行用ボタン
+
+# 同時に2つ走らないようにする
+concurrency:
+  group: ground-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # state.json をコミットするため
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run monitor
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python -m monitor.main
+
+      - name: Commit state
+        run: |
+          git config user.name "monitor-bot"
+          git config user.email "actions@github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "update state [skip ci]"
+          git push
+
+      # 失敗時はスクリーンショットとHTMLを成果物として保存（セレクタ調整用）
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 3
