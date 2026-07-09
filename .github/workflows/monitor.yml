@@ -1,7 +1,6 @@
 name: ground-monitor
 
 on:
-  schedule:
 schedule:
     - cron: "*/20 * * * *"   # 24時間・20分おき（夜間休止中のサイトは自動スキップ）
   workflow_dispatch: {}          # 手動実行用ボタン
