@@ -64,6 +64,8 @@ def main() -> int:
                     if url:
                         notify_lines.append(f"→ 予約: {url}")
                     notify_lines.append("")
+            except util.SkipSite as e:
+                print(f"[skip] {name}: {e}")
             except Exception as e:  # noqa: BLE001
                 print(f"[error] {name}: {e}")
                 traceback.print_exc()

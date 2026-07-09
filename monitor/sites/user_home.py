@@ -7,7 +7,7 @@
 import datetime as dt
 import re
 
-from ..util import UA, dump_debug, start_hour_ok, today_jst
+from ..util import UA, SkipSite, dump_debug, start_hour_ok, today_jst
 
 STATUS_AVAILABLE = ("available", "some")  # ラベルclass: 空き/一部空き
 
@@ -31,30 +31,79 @@ def _run_pass(browser, cfg, filters, date_set, start_date, results):
     try:
         page.goto(cfg["base_url"] + "/user/Home",
                   wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(3000)
+        head = (page.title() or "") + page.inner_text("body")[:500]
+        if any(w in head for w in ("休止", "メンテナンス", "サービス時間外", "利用時間外")):
+            raise SkipSite(f"{name}システムが停止時間帯")
+        print(f"[{name}] Home 表示OK ({start_date}〜)")
 
-        # 施設種類から探す → カテゴリボタン
-        page.get_by_role("button", name=cfg["category_button"]).first.click()
-        page.wait_for_url("**/AvailabilityCheckApplySelectFacility", timeout=30000)
-        page.wait_for_timeout(1500)
+        # 施設種類から探す → カテゴリボタン（1回で遷移しないことがあるためリトライ）
+        for attempt in range(3):
+            try:
+                page.get_by_role("button", name=cfg["category_button"]).first.click()
+                page.wait_for_url("**/AvailabilityCheckApplySelectFacility", timeout=8000)
+                break
+            except Exception:  # noqa: BLE001
+                print(f"[{name}] カテゴリボタン再クリック ({attempt + 1})")
+                page.wait_for_timeout(1500)
+        else:
+            raise RuntimeError("施設選択画面に遷移できない")
+        page.wait_for_timeout(2000)
+        print(f"[{name}] 施設選択 表示OK")
 
-        # 施設にチェック
+        # 施設にチェック（クリック後に checked を検証）
         for fac in cfg["facility_checkboxes"]:
-            cb = page.locator("label", has_text=fac).first
-            cb.click()
+            checked = page.evaluate(
+                """(fac) => {
+                  const labels = [...document.querySelectorAll('label')]
+                    .filter(l => l.textContent.includes(fac));
+                  for (const l of labels) {
+                    const input = l.querySelector('input[type=checkbox]') ||
+                      (l.htmlFor ? document.getElementById(l.htmlFor) : null) ||
+                      l.closest('td,div')?.querySelector('input[type=checkbox]');
+                    if (input) { if (!input.checked) input.click(); return input.checked; }
+                    l.click();
+                    return true;
+                  }
+                  return false;
+                }""",
+                fac,
+            )
+            print(f"[{name}] {fac} チェック: {checked}")
+            if not checked:
+                dump_debug(page, f"userhome_{name}_facility")
+                raise RuntimeError(f"施設が見つからない: {fac}")
             page.wait_for_timeout(400)
+
         page.get_by_role("button", name="次へ進む").first.click()
         page.wait_for_url("**/AvailabilityCheckApplySelectDays", timeout=30000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
+        print(f"[{name}] 施設別空き状況 表示OK")
 
         # 表示期間: 開始日と「1ヶ月」を設定して表示
-        date_input = page.locator('input[type="date"]').first
-        date_input.fill(start_date.isoformat())
-        page.wait_for_timeout(300)
-        page.get_by_text("1ヶ月", exact=True).first.click()
-        page.wait_for_timeout(300)
+        page.evaluate(
+            """(dayISO) => {
+              const d = document.querySelector('input[type=date]');
+              if (d) {
+                d.value = dayISO;
+                d.dispatchEvent(new Event('input', {bubbles: true}));
+                d.dispatchEvent(new Event('change', {bubbles: true}));
+              }
+              // 「1ヶ月」ラジオ
+              const radios = [...document.querySelectorAll('input[type=radio]')];
+              for (const r of radios) {
+                const l = r.closest('label') ||
+                  (r.id ? document.querySelector(`label[for="${r.id}"]`) : null);
+                const txt = (l ? l.textContent : '') + (r.parentElement ? r.parentElement.textContent : '');
+                if (/1ヶ月|1か月/.test(txt)) { if (!r.checked) r.click(); return; }
+              }
+            }""",
+            start_date.isoformat(),
+        )
+        page.wait_for_timeout(500)
         page.get_by_role("button", name="表示").first.click()
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(4000)
+        print(f"[{name}] 1ヶ月表示に切替OK")
 
         # 日単位グリッドを解析して空き(○/△)セルを選択
         row_re = re.compile(cfg.get("row_filter", "."))

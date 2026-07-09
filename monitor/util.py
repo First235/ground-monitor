@@ -14,6 +14,10 @@ STATE_FILE = "state.json"
 DEBUG_DIR = "debug"
 
 
+class SkipSite(Exception):
+    """メンテナンス中など、エラーではないが今回スキップする場合に投げる"""
+
+
 def today_jst() -> dt.date:
     return dt.datetime.now(JST).date()
 
@@ -104,12 +108,19 @@ def notify_discord(lines: list[str]) -> None:
 # ---------------- デバッグ ----------------
 
 def dump_debug(page, name: str) -> None:
-    """失敗時にHTMLとスクリーンショットを debug/ に保存（Actionsの成果物になる）"""
+    """失敗時にHTMLとスクリーンショットを debug/ に保存（Actionsの成果物になる）
+    page には Page でも Frame でも渡せる"""
+    os.makedirs(DEBUG_DIR, exist_ok=True)
     try:
-        os.makedirs(DEBUG_DIR, exist_ok=True)
+        html = page.evaluate("() => document.documentElement.outerHTML")
         with open(f"{DEBUG_DIR}/{name}.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-        page.screenshot(path=f"{DEBUG_DIR}/{name}.png", full_page=True)
-        print(f"[debug] saved {DEBUG_DIR}/{name}.html/.png")
+            f.write(html)
+        print(f"[debug] saved {DEBUG_DIR}/{name}.html")
     except Exception as e:  # noqa: BLE001
-        print(f"[debug] dump failed: {e}")
+        print(f"[debug] html dump failed: {e}")
+    try:
+        shooter = page.page if hasattr(page, "page") else page  # Frame -> Page
+        shooter.screenshot(path=f"{DEBUG_DIR}/{name}.png", full_page=True)
+        print(f"[debug] saved {DEBUG_DIR}/{name}.png")
+    except Exception as e:  # noqa: BLE001
+        print(f"[debug] screenshot failed: {e}")

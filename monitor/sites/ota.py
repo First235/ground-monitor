@@ -1,14 +1,16 @@
-"""大田区 うぐいすネット (yoyaku.city.ota.tokyo.jp) CGI型。
-※このサイトだけ事前にブラウザでの実画面確認ができていないため、
-  初回実行時に debug/ の成果物（HTML/スクリーンショット）を見て
-  セレクタを微調整する前提の実装。
-流れ(想定): トップ → ログインせずに空き状況を検索 → 施設の空き照会
-→ カテゴリで検索 → 「大田スタジアム」 → 選択した条件で次へ → 空き状況表。
+"""大田区 うぐいすネット (yoyaku.city.ota.tokyo.jp) CGI型。実画面確認済み。
+流れ: トップ(Welcome.cgi)
+ → 申込の種類「施設の空き照会／予約申込」
+ → 検索条件「カテゴリで検索」→ カテゴリ「大田スタジアム」→ 選択した条件で次へ
+ → 施設選択(Login.cgi): 施設を全て選択する → 選択した施設で検索
+ → 空き状況グリッド(ShisetsuMultiSelect.cgi): table.box_calendar
+   行=時間帯(07:00 - 09:00 等) / 列=日付(7月9日+曜日) / セル=img alt
+   alt「空き」を含めば空きコマ。「次の7日分」で週送り。
 """
 import datetime as dt
 import re
 
-from ..util import UA, dump_debug, start_hour_ok
+from ..util import UA, SkipSite, dump_debug, start_hour_ok, today_jst
 
 HOME = "https://www.yoyaku.city.ota.tokyo.jp/eshisetsu/menu/Welcome.cgi"
 BOOKING_URL = "https://www.yoyaku.city.ota.tokyo.jp/"
@@ -16,6 +18,7 @@ BOOKING_URL = "https://www.yoyaku.city.ota.tokyo.jp/"
 
 def fetch(browser, cfg, filters, dates) -> set[tuple[str, str, str]]:
     date_set = {d.isoformat() for d in dates}
+    end_iso = max(date_set)
     results: set[tuple[str, str, str]] = set()
     ctx = browser.new_context(user_agent=UA, locale="ja-JP")
     page = ctx.new_page()
@@ -23,43 +26,48 @@ def fetch(browser, cfg, filters, dates) -> set[tuple[str, str, str]]:
         page.goto(HOME, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(3000)
 
-        # ログインせずに空き状況を検索
-        page.get_by_text("ログインせずに空き状況を検索").first.click()
-        page.wait_for_timeout(1500)
+        # 夜間などのシステム休止を検知（エラー扱いにしない）
+        if "休止" in (page.title() or ""):
+            raise SkipSite("うぐいすネットがシステム休止中")
 
-        # 申込の種類: 施設の空き照会／予約申込
-        page.locator('input[name="yoyakuMode"]').first.check()
-        page.wait_for_timeout(500)
+        # 1. 申込の種類: 施設の空き照会／予約申込（ラジオをJSで確実に選択）
+        _js_check_radio_by_label(page, "施設の空き照会／予約申込")
+        print("[ota] 申込の種類 選択OK")
 
-        # 検索条件: カテゴリで検索 → カテゴリ名
-        try:
-            page.get_by_text("カテゴリで検索", exact=True).first.click()
-            page.wait_for_timeout(800)
-        except Exception:  # noqa: BLE001
-            pass
-        page.get_by_text(cfg.get("category", "大田スタジアム"), exact=True).first.click()
-        page.wait_for_timeout(800)
+        # 2. 検索条件: カテゴリで検索
+        _js_check_radio_by_label(page, "カテゴリで検索")
+        print("[ota] カテゴリで検索 選択OK")
 
-        page.get_by_text("選択した条件で次へ").first.click()
-        page.wait_for_load_state("domcontentloaded")
+        # 3. カテゴリ: 大田スタジアム（config変更可）
+        _js_check_radio_by_label(page, cfg.get("category", "大田スタジアム"))
+        print("[ota] カテゴリ 選択OK")
+
+        # 4. 選択した条件で次へ
+        _click_any(page, "選択した条件で次へ")
+        page.wait_for_url("**/Login.cgi**", timeout=30000)
         page.wait_for_timeout(3000)
+        print(f"[ota] 施設選択ページ: {page.url}")
 
-        # ここから先は施設一覧 or 空き状況カレンダーのはず。
-        # まず施設一覧なら先頭の施設を選んで進む
-        _maybe_advance(page)
+        # 5. 施設を全て選択する → 選択した施設で検索
+        _click_any(page, "施設を全て選択")
+        page.wait_for_timeout(1500)
+        _click_any(page, "選択した施設で検索")
+        page.wait_for_url("**/yoyaku/**", timeout=30000)
+        page.wait_for_timeout(3000)
+        print(f"[ota] 空き状況グリッド: {page.url}")
 
-        # 週送りしながら対象期間の表を読む
-        end = max(dates)
-        for _ in range(12):  # 最大12週分
-            found_dates = _parse_grid(page, cfg, filters, date_set, results)
-            if found_dates and max(found_dates) >= end.isoformat():
+        # 6. 週送りしながらグリッドを読む（7日表示 × 最大10週 ≒ 対象期間をカバー）
+        for week in range(10):
+            max_date = _parse_grid(page, cfg, filters, date_set, results)
+            print(f"[ota] week{week + 1}: 最終列 {max_date}, 累計空き {len(results)}件")
+            if max_date and max_date >= end_iso:
                 break
-            if not _click_next_week(page):
+            if not _next_week(page):
+                print("[ota] 次の7日分ボタンが押せないため終了")
                 break
-        if not results:
-            # 何も取れなかった場合は解析用に保存（空きゼロの可能性もある）
-            dump_debug(page, "ota_last_page")
         return results
+    except SkipSite:
+        raise
     except Exception:
         dump_debug(page, "ota_error")
         raise
@@ -67,78 +75,112 @@ def fetch(browser, cfg, filters, dates) -> set[tuple[str, str, str]]:
         ctx.close()
 
 
-def _maybe_advance(page):
-    """施設選択の中間ページが挟まる場合に前へ進める（ベストエフォート）"""
-    for label in ["大田スタジアム", "次へ"]:
-        try:
-            el = page.get_by_text(label, exact=False).first
-            if el.count() if hasattr(el, "count") else 0:
-                pass
-            el.click(timeout=3000)
-            page.wait_for_timeout(2000)
-        except Exception:  # noqa: BLE001
-            pass
+def _click_any(page, text):
+    """button でも a でも input でも、テキスト一致でクリック"""
+    btn = page.get_by_role("button", name=re.compile(text))
+    if btn.count() > 0:
+        btn.first.click()
+        return
+    link = page.get_by_role("link", name=re.compile(text))
+    if link.count() > 0:
+        link.first.click()
+        return
+    page.get_by_text(re.compile(text)).first.click()
+
+
+def _js_check_radio_by_label(page, label_text):
+    """ボタン風ラジオ（label内テキスト一致）をJSでクリックして checked を確認"""
+    ok = page.evaluate(
+        """(txt) => {
+          const labels = [...document.querySelectorAll('label')]
+            .filter(l => l.textContent.replace(/\\s+/g, '').includes(txt.replace(/\\s+/g, '')));
+          for (const l of labels) {
+            const input = l.querySelector('input[type=radio]') ||
+              (l.htmlFor ? document.getElementById(l.htmlFor) : null);
+            if (input) { input.click(); return input.checked; }
+            l.click();
+            return true;
+          }
+          // labelが無い場合: テキストを持つ要素をクリック
+          const els = [...document.querySelectorAll('button, span, div')]
+            .filter(e => e.children.length === 0 && e.textContent.trim() === txt);
+          if (els.length) { els[0].click(); return true; }
+          return false;
+        }""",
+        label_text,
+    )
+    if not ok:
+        dump_debug(page, f"ota_radio_{label_text[:8]}")
+        raise RuntimeError(f"選択肢が見つからない: {label_text}")
+    page.wait_for_timeout(800)
 
 
 def _parse_grid(page, cfg, filters, date_set, results):
-    """表を総当たりで解析: 日付ヘッダ + ○/△セル + 時間帯行/列"""
-    found_dates = []
-    tables = page.evaluate(
-        """() => [...document.querySelectorAll('table')].map(t =>
-             [...t.rows].map(r => [...r.cells].map(c => c.textContent.trim())))"""
+    """table.box_calendar を解析。戻り値は表中の最終日付(ISO)"""
+    data = page.evaluate(
+        """() => {
+          const t = document.querySelector('table.box_calendar');
+          if (!t) return null;
+          return [...t.rows].map(r => [...r.cells].map(c => {
+            const img = c.querySelector('img');
+            return {text: c.textContent.trim().replace(/\\s+/g, ' '),
+                    alt: img ? img.alt : null};
+          }));
+        }"""
     )
-    body = page.inner_text("body")
-    ym = re.search(r"(\d{4})年\s*(\d{1,2})月", body)
-    year = int(ym.group(1)) if ym else dt.date.today().year
+    if not data:
+        dump_debug(page, "ota_no_grid")
+        return None
 
-    for rows in tables:
-        if not rows or len(rows) < 2:
+    today = today_jst()
+    header = data[0]
+    col_dates = {}
+    for i, cell in enumerate(header):
+        dm = re.search(r"(\d{1,2})月(\d{1,2})日", cell["text"])
+        if dm:
+            mon, day = int(dm.group(1)), int(dm.group(2))
+            year = today.year + (1 if mon < today.month else 0)
+            col_dates[i] = dt.date(year, mon, day).isoformat()
+    if not col_dates:
+        dump_debug(page, "ota_no_dates")
+        return None
+
+    fac = cfg.get("category", "大田スタジアム")
+    for row in data[1:]:
+        if not row:
             continue
-        text = " ".join(" ".join(r) for r in rows)
-        if not re.search(r"[○△]", text):
+        slot = row[0]["text"]  # 例 "07:00 - 09:00"
+        if not re.search(r"\d{1,2}:\d{2}", slot):
             continue
-        # ヘッダ行から日付列を探す（「M/D」or「D(曜)」形式に対応）
-        header = rows[0]
-        col_dates = {}
-        for i, c in enumerate(header):
-            m1 = re.search(r"(\d{1,2})/(\d{1,2})", c)
-            m2 = re.search(r"(\d{1,2})月(\d{1,2})日", c)
-            if m1:
-                mon, day = int(m1.group(1)), int(m1.group(2))
-            elif m2:
-                mon, day = int(m2.group(1)), int(m2.group(2))
-            else:
+        if not start_hour_ok(slot, filters["start_hour_min"], filters["start_hour_max"]):
+            continue
+        for i, cell in enumerate(row):
+            if i not in col_dates:
                 continue
-            y = year if mon >= dt.date.today().month else year + 1
-            try:
-                col_dates[i] = dt.date(y, mon, day).isoformat()
-            except ValueError:
-                continue
-        if not col_dates:
-            continue
-        for row in rows[1:]:
-            slot_label = row[0] if row else ""
-            for i, cell in enumerate(row):
-                if i not in col_dates or cell not in ("○", "△"):
-                    continue
+            alt = cell["alt"] or ""
+            # 空きセルの alt は「空いています」(icn_scche_ok.png)
+            if "空い" in alt or "空き" in alt:
                 d = col_dates[i]
-                found_dates.append(d)
-                if d not in date_set:
-                    continue
-                label = slot_label if re.search(r"\d", slot_label) else "要確認"
-                if label == "要確認" or start_hour_ok(
-                    label, filters["start_hour_min"], filters["start_hour_max"]
-                ):
-                    results.add((cfg.get("category", "大田スタジアム"), d, label))
-    return found_dates
+                if d in date_set:
+                    results.add((fac, d, slot))
+    return max(col_dates.values())
 
 
-def _click_next_week(page) -> bool:
-    for name in ["翌週", "次の期間", "次週", "翌月"]:
-        try:
-            page.get_by_text(name, exact=False).first.click(timeout=3000)
-            page.wait_for_timeout(2500)
-            return True
-        except Exception:  # noqa: BLE001
-            continue
-    return False
+def _next_week(page) -> bool:
+    """「次の7日分」は <a class="link next">"""
+    try:
+        clicked = page.evaluate(
+            """() => {
+              const a = document.querySelector('a.link.next');
+              if (!a) return false;
+              a.click();
+              return true;
+            }"""
+        )
+        if not clicked:
+            return False
+        page.wait_for_timeout(3000)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[ota] 週送り失敗: {e}")
+        return False
